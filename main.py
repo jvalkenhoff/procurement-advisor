@@ -21,6 +21,16 @@ MODEL = "gpt-4.1-mini"
 MAX_PAGE_CHARS = 40000
 
 # Vendors the model needs to go through
+VENDORS = [
+  {
+    "Name": "Notion",
+    "URL": "https://www.notion.com/pricing",
+  },
+  {
+    "Name": "Confluence",
+    "URL": "https://www.atlassian.com/en/software/confluence/pricing",
+  },
+]
 VENDOR_NAME = "Notion"
 VENDOR_URL = "https://notion.com/pricing"
 
@@ -129,21 +139,49 @@ def get_page_innerhtml(page: Page) -> str:
   inner_html = page.evaluate(js)
   return inner_html
 
-def fetch_page_html() -> str:
+# not sure if this function works (found it on stackoverflow)
+def dismiss_cookie_banner(page: Page) -> None:
+  """Clicks the cookie banner if there is one"""
+  for label in ("Reject all", "Accept all", "Accept"):
+    button = page.get_by_role("button", name=label)
+    if button.count() > 0:
+      try:
+        button.first.click(timeout=2000)
+        return
+      except PlaywrightTimeoutError:
+        continue
+
+
+def fetch_page_html(page: Page, url: str, name: str) -> str:
+  load_page(page, url, name)
+  html = get_page_innerhtml(page)
+  return html
+
+def scrape_vendors() -> dict[str, str]:
+  scraped: dict[str, str] = {}
+
   with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
 
     try:
       page = browser.new_context(locale="en-US").new_page()
-      name = VENDOR_NAME
-      url = VENDOR_URL
-      load_page(page, url, name)
-      html = get_page_innerhtml(page)
 
+      for vendor in VENDORS:
+        name = vendor["Name"]
+        url = vendor["URL"]
+        print(f"Scraping: {name}: {url}")
+        html = fetch_page_html(page, url, name)
+        save_html(name, html)
+        scraped[name] = html
     finally:
       browser.close()
 
-  return html
+  return scraped
+
+def save_html(name: str, html: str) -> None:
+  """Creates the scraped folder (if needed) and saves one vendor's HTML in it."""
+  SCRAPE_DIR.mkdir(exist_ok=True)
+  (SCRAPE_DIR / f"{name.lower()}.html").write_text(html, encoding="utf-8")
 
 def check_apikey() -> str:
   load_dotenv(override=True)
@@ -189,12 +227,30 @@ def main() -> None:
     print(f"Unexpected error: {e}")
     raise
 
-  print(f"Scraping {VENDOR_NAME}: {VENDOR_URL}")
-  html = fetch_page_html()
+  scraped = scrape_vendors()
 
-  print("Extracting Plan...")
-  extraction = extract_vendor(client, VENDOR_NAME, html)
-  print(extraction.model_dump_json(indent=2))
+  results: dict[str, dict] = {}
+  for vendor in VENDORS:
+    name = vendor["Name"]
+
+    print(f"Extracting {name}...")
+    extraction = extract_vendor(client, name, scraped[name])
+    results[name] = extraction.model_dump()
+
+    ## following is possible due to the pydantic model defined at the top
+    print(f"{len(extraction.plans)} plans found")
+    for plan in extraction.plans:
+      print(f"{plan.name}: {plan.price_amount} {plan.currency} / {plan.billing_unit} / {plan.billing_period}")
+
+    (SCRAPE_DIR / "extractions.json").write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding='utf-8')
+    print("Saved scraped/extractions.json")
+
+  # print(f"Scraping {VENDOR_NAME}: {VENDOR_URL}")
+  # html = fetch_page_html()
+
+  # print("Extracting Plan...")
+  # extraction = extract_vendor(client, VENDOR_NAME, html)
+  # print(extraction.model_dump_json(indent=2))
 
 
 if __name__ == "__main__":
